@@ -1,0 +1,16 @@
+{
+  "name": "gmail-ai-interpreter",
+  "private": true,
+  "workspaces": [
+    "server",
+    "client"
+  ],
+  "scripts": {
+    "dev": "npx concurrently \"npm --workspace=server run dev\" \"npm --workspace=client run dev\"",
+    "build": "npm --workspace=server run build && npm --workspace=client run build",
+    "start": "npm --workspace=server run start"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
