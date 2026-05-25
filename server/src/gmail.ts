@@ -1,5 +1,6 @@
-import { gmail_v1, google } from 'googleapis';
+import { google } from 'googleapis';
 import { buildAuthorizedClient } from './googleAuth';
+import { getOrCreateThread, insertEmail } from './db/db';
 
 export type EmailSummary = {
   id: string;
@@ -8,6 +9,7 @@ export type EmailSummary = {
   from: string;
   date: string;
   snippet: string;
+  body?: string;
 };
 
 export type TaskItem = {
@@ -18,119 +20,126 @@ export type TaskItem = {
   email: EmailSummary;
 };
 
-const parseDate = (text: string, fallback: string): string => {
-  const datePatterns = [
-    /\bby\s+(\w+\s+\d{1,2}(?:,\s*\d{4})?)\b/i,
-    /\b(\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)\b/i,
-    /\b(on\s+\w+\s+\d{1,2}(?:,\s*\d{4})?)\b/i,
-    /\b(\w+\s+\d{1,2})(?:,\s*\d{4})?\b/i
-  ];
+const decodeBase64Url = (value?: string) => {
+  if (!value) {
+    return '';
+  }
 
-  for (const pattern of datePatterns) {
-    const match = text.match(pattern);
-    if (match?.[1]) {
-      const attempt = new Date(match[1]);
-      if (!Number.isNaN(attempt.getTime())) {
-        return attempt.toISOString().split('T')[0];
-      }
+  const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
+  return Buffer.from(normalized, 'base64').toString('utf-8');
+};
+
+const getHeaderValue = (headers: any[], name: string) =>
+  headers.find((header) => header.name?.toLowerCase() === name.toLowerCase())?.value;
+
+const getBoundedEnvNumber = (name: string, fallback: number, min: number, max: number) => {
+  const value = Number(process.env[name] || fallback);
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+
+  return Math.min(Math.max(Math.floor(value), min), max);
+};
+
+const mapWithConcurrency = async <T, R>(
+  items: T[],
+  concurrency: number,
+  mapper: (item: T) => Promise<R>
+) => {
+  const results: R[] = [];
+  let nextIndex = 0;
+
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      results[currentIndex] = await mapper(items[currentIndex]);
+    }
+  });
+
+  await Promise.all(workers);
+  return results;
+};
+
+const extractBodyText = (payload?: any): string => {
+  if (!payload) {
+    return '';
+  }
+
+  const mimeType = payload.mimeType || '';
+  const bodyData = decodeBase64Url(payload.body?.data).trim();
+
+  if (bodyData && (mimeType === 'text/plain' || !payload.parts?.length)) {
+    return bodyData;
+  }
+
+  const parts = Array.isArray(payload.parts) ? payload.parts : [];
+  for (const part of parts) {
+    const partText = extractBodyText(part).trim();
+    if (partText) {
+      return partText;
     }
   }
 
-  return fallback;
-};
-
-const inferPriority = (text: string, due: string): 'High' | 'Medium' | 'Low' => {
-  const normalized = text.toLowerCase();
-  if (normalized.includes('urgent') || normalized.includes('asap') || normalized.includes('immediately')) {
-    return 'High';
-  }
-
-  const dueDate = new Date(due);
-  const now = new Date();
-  const diffMs = dueDate.getTime() - now.getTime();
-  const diffDays = diffMs / (1000 * 60 * 60 * 24);
-
-  if (diffDays <= 2) {
-    return 'High';
-  }
-  if (diffDays <= 7) {
-    return 'Medium';
-  }
-  return 'Low';
-};
-
-const extractTaskTitle = (subject: string, snippet: string): string => {
-  if (subject && /action|required|please|due|deadline|review|approve|follow up|meeting|schedule/i.test(subject)) {
-    return subject;
-  }
-
-  const candidate = snippet.split(/[\.\n]/).find((line) => /please|due|deadline|review|approve|follow up|meeting|schedule/i.test(line));
-  return candidate?.trim() || subject || snippet.slice(0, 80);
-};
-
-export const extractTasksFromEmail = (email: EmailSummary): TaskItem | null => {
-  const text = `${email.subject} ${email.snippet}`;
-  const taskTitle = extractTaskTitle(email.subject, email.snippet);
-  if (!taskTitle || taskTitle.length < 8) {
-    return null;
-  }
-
-  const dueDate = parseDate(text, new Date(email.date).toISOString().split('T')[0]);
-  const priority = inferPriority(text, dueDate);
-
-  return {
-    title: taskTitle,
-    source: email.from,
-    dueDate,
-    priority,
-    email
-  };
+  return bodyData;
 };
 
 export const fetchRecentEmails = async (tokens: any): Promise<EmailSummary[]> => {
   const authClient = buildAuthorizedClient(tokens);
   const gmail = google.gmail({ version: 'v1', auth: authClient });
+  const maxResults = getBoundedEnvNumber('GMAIL_SYNC_LIMIT', 25, 1, 100);
+  const concurrency = getBoundedEnvNumber('GMAIL_SYNC_CONCURRENCY', 8, 1, 20);
 
   const listResponse = await gmail.users.messages.list({
     userId: 'me',
-    maxResults: 100,
+    maxResults,
     q: 'in:inbox -label:promotions newer_than:30d'
   });
 
   const messages = listResponse.data.messages || [];
-  const results: EmailSummary[] = [];
+  const validMessages = messages.filter((message): message is { id: string; threadId?: string | null } =>
+    Boolean(message.id)
+  );
 
-  for (const message of messages) {
-    if (!message.id) continue;
+  return mapWithConcurrency(validMessages, concurrency, async (message) => {
     const messageResponse = await gmail.users.messages.get({
       userId: 'me',
       id: message.id,
-      format: 'metadata',
-      metadataHeaders: ['Subject', 'From', 'Date']
+      format: 'full'
     });
 
     const headers = messageResponse.data.payload?.headers || [];
-    const subject = headers.find((header) => header.name === 'Subject')?.value || 'No subject';
-    const from = headers.find((header) => header.name === 'From')?.value || 'Unknown sender';
-    const date = headers.find((header) => header.name === 'Date')?.value || new Date().toISOString();
+    const subject = getHeaderValue(headers, 'Subject') || 'No subject';
+    const from = getHeaderValue(headers, 'From') || 'Unknown sender';
+    const date = getHeaderValue(headers, 'Date') || new Date().toISOString();
     const snippet = messageResponse.data.snippet || '';
+    const body = extractBodyText(messageResponse.data.payload);
 
-    results.push({
+    const emailSummary: EmailSummary = {
       id: message.id,
       threadId: message.threadId || '',
       subject,
       from,
       date,
-      snippet
-    });
-  }
+      snippet,
+      body
+    };
 
-  return results;
-};
+    // Store in database
+    try {
+      const threadId = await getOrCreateThread(message.threadId || '', subject, snippet);
+      await insertEmail(threadId as number, message.id, {
+        subject,
+        from,
+        to: '',
+        date,
+        snippet,
+        body
+      });
+    } catch (error) {
+      console.error('Error storing email in DB:', error);
+    }
 
-export const buildTaskList = (emails: EmailSummary[]): TaskItem[] => {
-  return emails
-    .map(extractTasksFromEmail)
-    .filter((task): task is TaskItem => task !== null)
-    .sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+    return emailSummary;
+  });
 };

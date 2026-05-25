@@ -34,6 +34,14 @@ export const exchangeCodeForTokens = async (code: string) => {
   return tokens;
 };
 
+export const getUserInfo = async (tokens: any) => {
+  const oAuth2Client = getOAuth2Client();
+  oAuth2Client.setCredentials(tokens);
+  const oauth2 = google.oauth2({ auth: oAuth2Client, version: 'v2' });
+  const response = await oauth2.userinfo.get();
+  return response.data;
+};
+
 export const buildAuthorizedClient = (tokens: any): OAuth2Client => {
   const oAuth2Client = getOAuth2Client();
   oAuth2Client.setCredentials(tokens);

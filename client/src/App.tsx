@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { fetchTasks, getAuthStatus, getAuthUrl, TaskItem } from './api';
+import { fetchTasks, getAuthStatus, getAuthUrl } from './api';
+import type { TaskItem } from './api';
 
 const getGroupLabel = (dueDate: string) => {
   const due = new Date(dueDate);
@@ -30,8 +31,13 @@ function App() {
 
   useEffect(() => {
     const checkConnection = async () => {
-      const result = await getAuthStatus();
-      setConnected(result.connected);
+      try {
+        const result = await getAuthStatus();
+        setConnected(result.connected);
+      } catch (err) {
+        console.error('Failed to check auth status:', err);
+        setError('Unable to connect to server. Please check your connection.');
+      }
     };
     checkConnection();
   }, []);
@@ -59,15 +65,21 @@ function App() {
       setError(null);
       setLoading(true);
       const response = await fetchTasks();
-      setTasks(response.tasks);
-    } catch (_err) {
+      const fetchedTasks = response.tasks ?? [];
+      if (!Array.isArray(fetchedTasks)) {
+        throw new Error('Invalid task response from server.');
+      }
+      setTasks(fetchedTasks);
+    } catch (err) {
+      console.error('Sync error:', err);
       setError('Unable to sync tasks. Please reconnect or try again.');
+      setTasks([]);
     } finally {
       setLoading(false);
     }
   };
 
-  const groupedTasks = groupTasks(tasks);
+  const groupedTasks = groupTasks(tasks || []);
 
   return (
     <div className="app-shell">

@@ -12,8 +12,5 @@
   },
   "devDependencies": {
     "concurrently": "^8.2.2"
-  },
-  "dependencies": {
-    "gh": "^2.8.9"
   }
 }
