@@ -25,12 +25,30 @@ A full-stack web app for connecting Gmail, syncing recent emails, and extracting
    - `CLIENT_ROOT_URL=http://localhost:5173`
    - `SESSION_SECRET` (any random string)
    - `DATABASE_URL` (from Supabase)
-   - `OPENROUTER_API_KEY`
-   - `OPENROUTER_MODEL` (optional, defaults to `openrouter/free`; use a model ID ending in `:free` for a specific free model)
-   - `GMAIL_SYNC_LIMIT` (optional, defaults to `25`)
+   - `OLLAMA_BASE_URL` (optional, defaults to `http://localhost:11434`)
+   - `OLLAMA_MODEL` (optional, defaults to `qwen2.5:7b`)
+   - `GMAIL_QUERY` (optional, defaults to unread inbox mail from the last 90 days)
+   - `GMAIL_SYNC_LIMIT` (optional, defaults to `20`)
    - `GMAIL_SYNC_CONCURRENCY` (optional, defaults to `8`)
-   - `TASK_EXTRACTION_CHUNK_SIZE` (optional, defaults to `10`)
-   - `MAX_EMAIL_BODY_CHARS` (optional, defaults to `4000`)
+   - `TASK_EXTRACTION_CHUNK_SIZE` (optional, defaults to `3`)
+   - `MAX_EMAIL_BODY_CHARS` (optional, defaults to `1200`)
+   - `OLLAMA_MAX_TOKENS` (optional, defaults to `4096`)
+   - `OLLAMA_AGENT_RETRIES` (optional, defaults to `2`)
+   - `OLLAMA_REQUEST_TIMEOUT_MS` (optional, defaults to `120000`)
+
+## Local Ollama setup
+
+Install Ollama and pull the local model:
+
+```bash
+ollama pull qwen2.5:7b
+```
+
+Then set:
+
+```bash
+OLLAMA_MODEL=qwen2.5:7b
+```
 6. Install dependencies:
    ```bash
    npm install

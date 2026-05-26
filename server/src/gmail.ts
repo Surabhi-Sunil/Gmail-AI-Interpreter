@@ -1,6 +1,6 @@
 import { google } from 'googleapis';
 import { buildAuthorizedClient } from './googleAuth';
-import { getOrCreateThread, insertEmail } from './db/db';
+import { getExistingMessageIds, getOrCreateThread, insertEmail } from './db/db';
 
 export type EmailSummary = {
   id: string;
@@ -18,6 +18,23 @@ export type TaskItem = {
   dueDate: string;
   priority: 'High' | 'Medium' | 'Low';
   email: EmailSummary;
+};
+
+export type EmailInsight = {
+  category: 'Needs Reply' | 'Task' | 'Meeting' | 'FYI' | 'Newsletter' | 'Promotion' | 'Receipt' | 'Noise';
+  urgency: 'High' | 'Medium' | 'Low';
+  summary: string;
+  suggestedAction: string;
+  reason: string;
+  status?: 'active' | 'done' | 'ignored';
+  email: EmailSummary;
+};
+
+export type EmailSyncResult = {
+  emails: EmailSummary[];
+  listedMessageIds: string[];
+  listed: number;
+  skippedExisting: number;
 };
 
 const decodeBase64Url = (value?: string) => {
@@ -84,24 +101,26 @@ const extractBodyText = (payload?: any): string => {
   return bodyData;
 };
 
-export const fetchRecentEmails = async (tokens: any): Promise<EmailSummary[]> => {
+export const fetchRecentEmails = async (tokens: any): Promise<EmailSyncResult> => {
   const authClient = buildAuthorizedClient(tokens);
   const gmail = google.gmail({ version: 'v1', auth: authClient });
-  const maxResults = getBoundedEnvNumber('GMAIL_SYNC_LIMIT', 25, 1, 100);
+  const maxResults = getBoundedEnvNumber('GMAIL_SYNC_LIMIT', 5, 1, 100);
   const concurrency = getBoundedEnvNumber('GMAIL_SYNC_CONCURRENCY', 8, 1, 20);
 
   const listResponse = await gmail.users.messages.list({
     userId: 'me',
     maxResults,
-    q: 'in:inbox -label:promotions newer_than:30d'
+    q: process.env.GMAIL_QUERY || 'in:inbox is:unread -category:promotions newer_than:90d'
   });
 
   const messages = listResponse.data.messages || [];
   const validMessages = messages.filter((message): message is { id: string; threadId?: string | null } =>
     Boolean(message.id)
   );
+  const existingMessageIds = await getExistingMessageIds(validMessages.map(message => message.id));
+  const newMessages = validMessages.filter(message => !existingMessageIds.has(message.id));
 
-  return mapWithConcurrency(validMessages, concurrency, async (message) => {
+  const emails = await mapWithConcurrency(newMessages, concurrency, async (message) => {
     const messageResponse = await gmail.users.messages.get({
       userId: 'me',
       id: message.id,
@@ -142,4 +161,87 @@ export const fetchRecentEmails = async (tokens: any): Promise<EmailSummary[]> =>
 
     return emailSummary;
   });
+
+  return {
+    emails,
+    listedMessageIds: validMessages.map(message => message.id),
+    listed: validMessages.length,
+    skippedExisting: validMessages.length - newMessages.length
+  };
+};
+
+export const markEmailsAsRead = async (tokens: any, messageIds: string[]): Promise<void> => {
+  if (messageIds.length === 0) return;
+
+  const authClient = buildAuthorizedClient(tokens);
+  const gmail = google.gmail({ version: 'v1', auth: authClient });
+
+  await gmail.users.messages.batchModify({
+    userId: 'me',
+    requestBody: {
+      ids: messageIds,
+      removeLabelIds: ['UNREAD']
+    }
+  });
+
+  console.log(`Marked ${messageIds.length} emails as read`);
+};
+
+export const applyLabelToEmails = async (
+  tokens: any,
+  messageIds: string[],
+  labelName: string
+): Promise<void> => {
+  if (messageIds.length === 0) return;
+
+  const authClient = buildAuthorizedClient(tokens);
+  const gmail = google.gmail({ version: 'v1', auth: authClient });
+
+  // First, get or create the label
+  const labelsResponse = await gmail.users.labels.list({ userId: 'me' });
+  let labelId = labelsResponse.data.labels?.find((label) => label.name === labelName)?.id;
+
+  if (!labelId) {
+    const createResponse = await gmail.users.labels.create({
+      userId: 'me',
+      requestBody: {
+        name: labelName,
+        labelListVisibility: 'labelShow',
+        messageListVisibility: 'show'
+      }
+    });
+    labelId = createResponse.data.id;
+  }
+
+  if (!labelId) {
+    throw new Error(`Failed to get or create label: ${labelName}`);
+  }
+
+  // Apply the label to messages
+  await gmail.users.messages.batchModify({
+    userId: 'me',
+    requestBody: {
+      ids: messageIds,
+      addLabelIds: [labelId]
+    }
+  });
+
+  console.log(`Applied label "${labelName}" to ${messageIds.length} emails`);
+};
+
+export const archiveEmails = async (tokens: any, messageIds: string[]): Promise<void> => {
+  if (messageIds.length === 0) return;
+
+  const authClient = buildAuthorizedClient(tokens);
+  const gmail = google.gmail({ version: 'v1', auth: authClient });
+
+  await gmail.users.messages.batchModify({
+    userId: 'me',
+    requestBody: {
+      ids: messageIds,
+      removeLabelIds: ['INBOX']
+    }
+  });
+
+  console.log(`Archived ${messageIds.length} emails`);
 };
